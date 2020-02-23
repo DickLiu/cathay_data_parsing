@@ -20,7 +20,9 @@ import pymongo
 from pyquery import PyQuery as pq
 
 def log_print(*args, **kwargs):
-    print(*args, file=sys.stdout, **kwargs)
+    print(*args, file=sys.stdout, **kwargs)    
+
+
 
 class CathayWebScraping(object):    
     
@@ -30,10 +32,29 @@ class CathayWebScraping(object):
         self.parsing_region = parsing_region
         self.total_rows = total_rows
         self.opener = urllib.request.build_opener()
-        self.opener.addheaders = [self.header]        
+        self.opener.addheaders = [self.header]
+
+
+    def __chunk_for_rent_ids(func):
+        """
+        Cut down the length of input rent id list to these two methods to prevent from receiving
+        http error : request too large. Default chunk size is 300.
+        """
+        def inner(self, rent_id_list, chunk_size=300):
+            _generator = (rent_id_list[i: i + chunk_size]
+                          for i in range(0, len(rent_id_list), chunk_size))
+            detail_dict = defaultdict(dict)
+            for chunked_rent_id_list in _generator:
+                detail_dict_update = func(self, chunked_rent_id_list)
+                for k, v in detail_dict_update.items():
+                    detail_dict[k] = v
+                self.storing_to_mongodb(detail_dict_update)
+            return detail_dict
+        return inner        
         
-    def storing_to_mongodb(self):
-        detail_dict = self.parsing_591_details()
+    def storing_to_mongodb(self, detail_dict=None):
+        if detail_dict is None:
+            detail_dict = self.parsing_591_details()
         _mongodb_con_str = os.environ.get('mongodb_con_str')
         client = pymongo.MongoClient(_mongodb_con_str)
         db = client.cathay_parsing
@@ -60,21 +81,26 @@ class CathayWebScraping(object):
 #                                    'genderRestrict': _rent["genderRestrict"]})
         except Exception as e:
             log_print("{}".format(e))
-        
+            
+    @__chunk_for_rent_ids    
     def parsing_591_details(self, rent_detail_list=None):
-        rent_detail_list = self.parsing_591_links()
+        if rent_detail_list is None:
+            rent_detail_list = self.parsing_591_links()
         detail_dict = defaultdict(dict)
-        for _detail_href in rent_detail_list:
+        for index, _detail_href in enumerate(rent_detail_list):
             # https://rent.591.com.tw/rent-detail-8753781.html
             try:
                 _concat_href = "https://rent.591.com.tw/rent-detail-"+ _detail_href[1:] + ".html"
                 detail_text = self.opener.open(_concat_href)
             except HTTPError as e:
                 log_print("{}: {}".format(e, _detail_href))
+                continue
             except URLError as e:
                 log_print("{}: {}".format(e, _detail_href))
+                continue
             else:
-                log_print('ok: {}'.format(_concat_href))
+                if index % 100 == 0:
+                    log_print('ok: {} / {}'.format(index, _concat_href))
             
             try:
                 doctree_detail = pq(detail_text.read())
@@ -117,7 +143,7 @@ class CathayWebScraping(object):
             time.sleep(1)
         return detail_dict
     
-    def parsing_591_links(self, first_row=1):
+    def parsing_591_links(self, first_row=0):
         rent_detail_list = list()
         try:
             region_dict = {"台北市": 1,
@@ -137,7 +163,7 @@ class CathayWebScraping(object):
                 self.total_rows = 30000
         print(self.total_rows)
                                       
-        for i in range(1, self.total_rows, 7):
+        for i in range(first_row, self.total_rows, 8):
             try:
                 text = self.opener.open("https://m.591.com.tw/mobile-list.html?type=rent&regionid={}&firstRow={}".format(region, i))
             except HTTPError as e:
@@ -147,7 +173,7 @@ class CathayWebScraping(object):
             else:
                 log_print('ok (region:{} , firstRow:{})'.format(region, i))
             doctree = pq(text.read())
-            detail_href_list = [ i.attr('data-house') for i in doctree('li[class="data choose-li"]').items()]
+            detail_href_list = [ i.attr('data-house') for i in doctree('li[class="data choose-li"]').items() if i.attr('data-house') is not None]
             rent_detail_list.extend(detail_href_list)
             time.sleep(self.sleep_second)
         rent_detail_list = list(set(rent_detail_list))
@@ -167,4 +193,5 @@ if __name__ == '__main__':
                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Mobile Safari/537.36"),
                            parsing_region=_parsing_region,
                            total_rows=_total_rows)
-    _c.storing_to_mongodb()
+    rent_detail_list = _c.parsing_591_links()
+    _c.parsing_591_details(rent_detail_list)
